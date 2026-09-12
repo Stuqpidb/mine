@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TESTS</title></head>
+<body>
+<div id="summary">RUNNING</div>
+<div id="hearts"><canvas width="182" height="20"></canvas></div>
+<div id="hotbar"><canvas width="364" height="44"></canvas></div>
+<div id="selName"></div>
+<div id="hurtFlash"></div>
+<script>
+window.__errors = [];
+window.onerror = function (msg, src, line, col) {
+  window.__errors.push(msg + ' @ ' + src + ':' + line);
+  return false;
+};
+</script>
+<script src="js/noise.js"></script>
+<script src="js/blocks.js"></script>
+<script src="js/world.js"></script>
+<script src="js/mesher.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/inventory.js"></script>
+<script src="js/player.js"></script>
+<script src="js/ui.js"></script>
+<script>
+(function () {
+  var pass = 0, fail = 0;
+  function T(name, fn) {
+    try {
+      var r = fn();
+      if (r === false) throw new Error('returned false');
+      pass++;
+      log('PASS: ' + name);
+    } catch (e) {
+      fail++;
+      log('FAIL: ' + name + ' :: ' + (e && e.message ? e.message : e));
+    }
+  }
+  function log(s) {
+    var d = document.createElement('div');
+    d.className = 'res';
+    d.textContent = s;
+    document.body.appendChild(d);
+  }
+
+  window.addEventListener('load', function () {
+    uiEls.hearts = document.getElementById('hearts');
+    uiEls.hotbar = document.getElementById('hotbar');
+    uiEls.selName = document.getElementById('selName');
+    uiEls.hurtFlash = document.getElementById('hurtFlash');
+    var N;
+    T('noise: create + finite values', function () {
+      N = createNoise(12345);
+      var v = N.noise3(1.5, 2.5, 3.5);
+      var o = N.oct(0.5, 0, 0.5, 4, 0.5, 2);
+      if (!isFinite(v) || !isFinite(o)) throw new Error('non-finite');
+      if (v < -1.1 || v > 1.1) throw new Error('range ' + v);
+    });
+
+    T('noise: deterministic', function () {
+      var a = createNoise(777).noise3(9.1, 8.2, 7.3);
+      var b = createNoise(777).noise3(9.1, 8.2, 7.3);
+      if (a !== b) throw new Error('mismatch');
+    });
+
+    T('blocks: atlas built, tiles indexed', function () {
+      if (atlasCanvas.width !== TILE_PAINTERS.length * CELL) throw new Error('atlas width ' + atlasCanvas.width);
+      if (TILE_INDEX['grass_top'] !== 0) throw new Error('grass_top index');
+      if (BLOCKS.length !== 23) throw new Error('blocks count ' + BLOCKS.length);
+      if (BLOCKS[1].top !== 'grass_top') throw new Error('grass def');
+    });
+
+    T('blocks: itemMeta and icons', function () {
+      if (itemMeta(3).kind !== 'block') throw new Error('stone meta');
+      if (itemMeta(100).kind !== 'tool') throw new Error('pick meta');
+      if (itemMeta(202).name !== 'Уголь') throw new Error('coal name');
+      if (itemMeta(0)) throw new Error('air must be null');
+      if (!iconFor(3)) throw new Error('stone icon');
+      if (!(iconFor(100) instanceof HTMLCanvasElement)) throw new Error('pick icon canvas');
+    });
+
+    var W;
+    T('world: spawn chunk generation', function () {
+      W = new World(4242);
+      var d = W.ensureChunk(0, 0);
+      if (!d || d.length !== 16 * 128 * 16) throw new Error('data len');
+      var bedrock = d[0 + 0 + 0];
+      if (bedrock !== 10) throw new Error('bedrock at y0: ' + bedrock);
+    });
+
+    T('world: all block ids valid', function () {
+      var d = W.getChunk(0, 0);
+      for (var i = 0; i < d.length; i++) {
+        if (d[i] >= BLOCKS.length) throw new Error('bad id ' + d[i] + ' at ' + i);
+      }
+    });
+
+    T('world: heights within bounds', function () {
+      for (var x = -50; x <= 50; x += 10) for (var z = -50; z <= 50; z += 10) {
+        var at = W.heightAt(x, z);
+        if (at.h < 1 || at.h > 124) throw new Error('h=' + at.h);
+        if (['plains','forest','desert','snow'].indexOf(at.biome) < 0) throw new Error('biome ' + at.biome);
+      }
+    });
+
+    T('world: getBlock cross-chunk and negative coords', function () {
+      W.ensureChunk(-1, -1);
+      var id = W.getBlock(-1, 40, -1);
+      if (id >= BLOCKS.length) throw new Error('bad id');
+      if (W.getBlock(5, -5, 5) !== AIR) throw new Error('below world');
+      if (W.getBlock(5, 200, 5) !== AIR) throw new Error('above world');
+    });
+
+    T('world: surface exists somewhere', function () {
+      var found = false;
+      for (var x = 8; x < 200 && !found; x += 16) {
+        var top = W.getTopSolid(x, 8);
+        if (top > SEA) found = true;
+      }
+      if (!found) throw new Error('no land found in 200 blocks');
+    });
+
+    var M;
+    T('mesher: chunk mesh builds', function () {
+      M = buildChunkMesh(W, 0, 0);
+      if (!M || !M.solid) throw new Error('no solid mesh');
+      if (M.solid.pos.length === 0) throw new Error('empty mesh');
+      if (M.solid.pos.length % 12 !== 0) throw new Error('pos not multiple of 12');
+      if (M.solid.pos.length / 3 !== M.solid.norm.length / 3) throw new Error('norm len');
+      if (M.solid.uv.length / 2 !== M.solid.pos.length / 3) throw new Error('uv len');
+      if (M.solid.col.length !== M.solid.pos.length) throw new Error('col len');
+      var nv = M.solid.pos.length / 3;
+      if (M.solid.idx.length !== nv / 4 * 6) throw new Error('idx count');
+      for (var i = 0; i < M.solid.uv.length; i++) {
+        var u = M.solid.uv[i];
+        if (u < -0.001 || u > 1.001) throw new Error('uv out of range: ' + u);
+      }
+    });
+
+    T('mesher: water mesh when ocean nearby', function () {
+      var anyWater = false;
+      for (var cx = -8; cx <= 8 && !anyWater; cx++) {
+        for (var cz = -8; cz <= 8 && !anyWater; cz++) {
+          var m = buildChunkMesh(W, cx, cz);
+          if (m && m.water) anyWater = true;
+        }
+      }
+      if (!anyWater) throw new Error('no water mesh found in 17x17 chunks (suspicious)');
+    });
+
+    T('raycast: hits ground from above', function () {
+      var x = 8, z = 8;
+      var top = W.getTopSolid(x, z);
+      var hit = voxelRaycast(W, x + 0.5, top + 3, z + 0.5, 0, -1, 0, 10);
+      if (!hit) throw new Error('no hit');
+      if (hit.y > top) throw new Error('hit above top: ' + hit.y + ' > ' + top);
+    });
+
+    T('raycast: respects direction and reach', function () {
+      var hit = voxelRaycast(W, 500, 200, 500, 0, 1, 0, 7);
+      if (hit) throw new Error('hit going up in sky');
+    });
+
+    T('world: setBlock + diff save/load', function () {
+      var x = 8, z = 8;
+      var top = W.getTopSolid(x, z);
+      W.setBlock(x, top + 1, z, 3);
+      if (W.getBlock(x, top + 1, z) !== 3) throw new Error('place failed');
+      if (W.dirtyKeys.size === 0) throw new Error('dirty not marked');
+      var ser = W.serialize();
+      var W2 = new World(4242);
+      W2.loadDiffs(ser.diffs);
+      W2.ensureChunk(0, 0);
+      if (W2.getBlock(x, top + 1, z) !== 3) throw new Error('diff not applied after regen');
+      W.setBlock(x, top + 1, z, AIR);
+      if (W.getBlock(x, top + 1, z) !== AIR) throw new Error('break failed');
+      var ser2 = W.serialize();
+      var W3 = new World(4242);
+      W3.loadDiffs(ser2.diffs);
+      W3.ensureChunk(0, 0);
+      if (W3.getBlock(x, top + 1, z) !== AIR) throw new Error('air diff not applied');
+    });
+
+    T('inventory: addItem stacking', function () {
+      INV.slots = new Array(36).fill(null);
+      var left = addItem(3, 70);
+      if (left !== 0) throw new Error('left ' + left);
+      var total = INV.slots.reduce(function (a, s) { return a + (s ? s.n : 0); }, 0);
+      if (total !== 70) throw new Error('total ' + total);
+      INV.slots = new Array(36).fill(null);
+    });
+
+    T('craft: log -> planks', function () {
+      INV.craft2 = new Array(4).fill(null);
+      INV.craft2[0] = { id: 5, n: 3 };
+      refreshCraft(2, 2);
+      if (!INV.result || INV.result.id !== 6 || INV.result.n !== 4) throw new Error('result: ' + JSON.stringify(INV.result));
+      doCraft(2, 2);
+      if (INV.craft2[0].n !== 2) throw new Error('consumed wrong amount: ' + INV.craft2[0].n);
+    });
+
+    T('craft: pickaxe pattern (3x3)', function () {
+      INV.craft3 = new Array(9).fill(null);
+      INV.craft3[0] = { id: 6, n: 1 };
+      INV.craft3[1] = { id: 6, n: 1 };
+      INV.craft3[2] = { id: 6, n: 1 };
+      INV.craft3[4] = { id: 203, n: 1 };
+      INV.craft3[7] = { id: 203, n: 1 };
+      refreshCraft(3, 3);
+      if (!INV.result || INV.result.id !== 100) throw new Error('pick not matched: ' + JSON.stringify(INV.result));
+      INV.craft3 = new Array(9).fill(null);
+    });
+
+    T('craft: pattern position independent', function () {
+      INV.craft3 = new Array(9).fill(null);
+      INV.craft3[4] = { id: 5, n: 1 };
+      refreshCraft(3, 3);
+      if (!INV.result || INV.result.id !== 6) throw new Error('offset recipe failed');
+      INV.craft3 = new Array(9).fill(null);
+    });
+
+    T('furnace: smelt iron with coal', function () {
+      FURNACE.input = { id: 14, n: 2 };
+      FURNACE.fuel = { id: 202, n: 2 };
+      FURNACE.out = null;
+      FURNACE.burn = 0; FURNACE.progress = 0;
+      for (var i = 0; i < 70; i++) furnaceTick(0.1);
+      if (!FURNACE.out || FURNACE.out.id !== 200 || FURNACE.out.n < 1) throw new Error('no iron ingot: ' + JSON.stringify(FURNACE.out));
+    });
+
+    T('furnace: stops on wrong output type', function () {
+      FURNACE.input = { id: 14, n: 1 };
+      FURNACE.fuel = { id: 202, n: 1 };
+      FURNACE.out = { id: 201, n: 5 };
+      FURNACE.burn = 0; FURNACE.progress = 0;
+      for (var i = 0; i < 100; i++) furnaceTick(0.1);
+      if (FURNACE.out.n !== 5 || FURNACE.out.id !== 201) throw new Error('output corrupted');
+      FURNACE.input = null; FURNACE.fuel = null; FURNACE.out = null; FURNACE.burn = 0; FURNACE.progress = 0;
+    });
+
+    T('tools: speed and durability', function () {
+      if (toolSpeed(101, 3) !== 4) throw new Error('stone pick on stone: ' + toolSpeed(101, 3));
+      if (toolSpeed(101, 2) !== 0.5) throw new Error('wrong tool on dirt');
+      if (toolSpeed(101, 16) !== 0.2) throw new Error('stone pick on diamond');
+      INV.slots = new Array(36).fill(null);
+      INV.sel = 0;
+      INV.slots[0] = { id: 100, n: 1 };
+      var brokeAt = -1;
+      for (var i = 0; i < 70; i++) {
+        if (damageTool(INV.slots[0])) { brokeAt = i; break; }
+      }
+      if (brokeAt < 0) throw new Error('never broke');
+      if (INV.slots[0] !== null) throw new Error('slot not cleared');
+    });
+
+    T('player: falls and lands', function () {
+      var x = 8, z = 8, top = 0;
+      var found = false;
+      for (var attempt = 0; attempt < 40 && !found; attempt++) {
+        top = W.getTopSolid(x, z);
+        if (top > SEA) {
+          var clear = true;
+          for (var yy = top + 1; yy < top + 12; yy++) {
+            if (W.getBlock(x, yy, z) !== AIR) { clear = false; break; }
+          }
+          if (clear) found = true;
+        }
+        if (!found) x += 8;
+      }
+      if (!found) throw new Error('no clear land found');
+      PLAYER.pos = { x: x + 0.5, y: top + 6, z: z + 0.5 };
+      PLAYER.vel = { x: 0, y: 0, z: 0 };
+      PLAYER.flying = false;
+      PLAYER.dead = false;
+      PLAYER.health = 20;
+      keys = {};
+      var landed = false;
+      for (var i = 0; i < 600; i++) {
+        updatePlayer(W, 1 / 60);
+        if (PLAYER.onGround) { landed = true; break; }
+      }
+      if (!landed) throw new Error('never landed');
+      if (PLAYER.pos.y > top + 1.011) throw new Error('floating: y=' + PLAYER.pos.y + ' top=' + top);
+    });
+
+    T('player: walk into wall collides', function () {
+      var top = W.getTopSolid(8, 8);
+      PLAYER.pos = { x: 8.5, y: top + 1.01, z: 8.5 };
+      PLAYER.vel = { x: 0, y: 0, z: 0 };
+      PLAYER.health = 999; PLAYER.dead = false;
+      keys = { KeyW: true };
+      for (var i = 0; i < 120; i++) updatePlayer(W, 1 / 60);
+      keys = {};
+      if (!isFinite(PLAYER.pos.x) || !isFinite(PLAYER.pos.y) || !isFinite(PLAYER.pos.z)) throw new Error('NaN position');
+      if (PLAYER.pos.y < -10) throw new Error('fell through world');
+    });
+
+    T('player: respawn resets', function () {
+      PLAYER.health = 0; PLAYER.dead = true;
+      respawnPlayer();
+      if (PLAYER.dead || PLAYER.health !== 20) throw new Error('respawn failed');
+    });
+
+    T('serialize: full save JSON structure', function () {
+      INV.slots = new Array(36).fill(null);
+      INV.slots[0] = { id: 3, n: 5 };
+      var data = { seed: 1, diffs: [1, 2, 3, 4], inv: INV.slots.map(function (s) { return s ? [s.id, s.n, s.dur] : null; }) };
+      var j = JSON.stringify(data);
+      var back = JSON.parse(j);
+      if (back.diffs.length !== 4) throw new Error('diffs');
+      if (back.inv[0][0] !== 3) throw new Error('inv');
+    });
+
+    T('ui: hearts/hotbar draw without crash', function () {
+      PLAYER.health = 13;
+      uiDrawHearts();
+      uiDrawHotbar();
+      uiDrawHearts();
+    });
+
+    var s = document.getElementById('summary');
+    if (window.__errors.length) {
+      s.textContent = 'RESULT: ' + pass + ' passed, ' + fail + ' failed, ' + window.__errors.length + ' runtime errors';
+      window.__errors.forEach(function (e) { log('SCRIPT ERROR: ' + e); });
+    } else {
+      s.textContent = 'RESULT: ' + pass + ' passed, ' + fail + ' failed, 0 runtime errors';
+    }
+  });
+})();
+</script>
+</body>
+</html>
